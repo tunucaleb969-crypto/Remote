@@ -1,20 +1,25 @@
 package com.hikersremote
 
 import android.os.Bundle
+import android.util.Base64
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.flyfishxu.kadb.Kadb
+import com.tananaev.adblib.AdbBase64
+import com.tananaev.adblib.AdbConnection
+import com.tananaev.adblib.AdbCrypto
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.net.Socket
 
 class MainActivity : AppCompatActivity() {
 
-    private var kadb: Kadb? = null
+    private var connection: AdbConnection? = null
     private lateinit var etIp: EditText
     private lateinit var tvStatus: TextView
 
@@ -41,6 +46,23 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnMenu).setOnClickListener { sendKey(82) }
     }
 
+    private fun getCrypto(): AdbCrypto {
+        val base64 = object : AdbBase64 {
+            override fun encodeToString(data: ByteArray): String {
+                return Base64.encodeToString(data, Base64.NO_WRAP)
+            }
+        }
+        val privKey = File(filesDir, "adbkey")
+        val pubKey = File(filesDir, "adbkey.pub")
+        return if (privKey.exists() && pubKey.exists()) {
+            AdbCrypto.loadAdbKeyPair(base64, privKey, pubKey)
+        } else {
+            val crypto = AdbCrypto.generateAdbKeyPair(base64)
+            crypto.saveAdbKeyPair(privKey, pubKey)
+            crypto
+        }
+    }
+
     private fun connect() {
         val ip = etIp.text.toString().trim()
         if (ip.isEmpty()) {
@@ -50,8 +72,14 @@ class MainActivity : AppCompatActivity() {
         tvStatus.text = "Connecting..."
         lifecycleScope.launch {
             try {
-                val connection = withContext(Dispatchers.IO) { Kadb.create(ip, 5555) }
-                kadb = connection
+                val conn = withContext(Dispatchers.IO) {
+                    val crypto = getCrypto()
+                    val socket = Socket(ip, 5555)
+                    val c = AdbConnection.create(socket, crypto)
+                    c.connect()
+                    c
+                }
+                connection = conn
                 tvStatus.text = "Connected to $ip"
             } catch (e: Exception) {
                 tvStatus.text = "Failed: ${e.message}"
@@ -61,14 +89,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun sendKey(code: Int) {
-        val connection = kadb
-        if (connection == null) {
+        val conn = connection
+        if (conn == null) {
             Toast.makeText(this, "Connect to the TV first", Toast.LENGTH_SHORT).show()
             return
         }
         lifecycleScope.launch {
             try {
-                withContext(Dispatchers.IO) { connection.shell("input keyevent $code") }
+                withContext(Dispatchers.IO) {
+                    val stream = conn.open("shell:input keyevent $code")
+                    stream.close()
+                }
             } catch (e: Exception) {
                 tvStatus.text = "Error: ${e.message}"
             }
@@ -77,6 +108,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        try { kadb?.close() } catch (_: Exception) {}
+        try { connection?.close() } catch (_: Exception) {}
     }
 }
